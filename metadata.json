@@ -1,0 +1,6 @@
+{
+  "name": "NovaCut AI: Smart Video Editor",
+  "description": "An AI-powered video automation platform for smart cropping, silence removal, and natural language editing.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["AI Video Understanding", "Automated Editing"]
+}
