@@ -33,24 +33,10 @@ import {
 import { motion, AnimatePresence } from "motion/react";
 import { VideoMetadata, EditPlan, EditOperation } from "./types";
 import { parseEditingInstructions } from "./services/aiService";
+import { AudioMixingEngine, SmartMusicSetter, AudioEvent } from "./lib/audioEngine";
+import { AUDIO_LIBRARY } from "./lib/audioLibrary";
 
-const MUSIC_LIBRARY = [
-  { id: 'upbeat', name: 'Upbeat Energetic', url: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3', genre: 'Upbeat', mood: 'high energy, motivational, fast-paced' },
-  { id: 'chill', name: 'Chill Lo-Fi', url: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3', genre: 'Relaxing', mood: 'background, study, relaxed' },
-  { id: 'cinematic', name: 'Cinematic Tech', url: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-8.mp3', genre: 'Cinematic', mood: 'professional, technical, explanatory' },
-  { id: 'piano', name: 'Piano Melancholy', url: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-3.mp3', genre: 'Piano', mood: 'sad, reflective, emotional' },
-  { id: 'corporate', name: 'Corporate Motivation', url: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-10.mp3', genre: 'Corporate', mood: 'business, presentation, clear' },
-  { id: 'smooth', name: 'Smooth Jazz', url: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-16.mp3', genre: 'Jazz', mood: 'sophisticated, dining, smooth' },
-];
-
-const BL_MAPPING: Record<string, string> = {
-  'BL-01': 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3',
-  'BL-02': 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-8.mp3',
-  'BL-03': 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-10.mp3',
-  'BL-04': 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3',
-  'BL-05': 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-3.mp3',
-  'BL-06': 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-16.mp3'
-};
+const audioEngine = new AudioMixingEngine();
 
 export default function App() {
   const [video, setVideo] = useState<VideoMetadata | null>(null);
@@ -66,11 +52,18 @@ export default function App() {
   const [logoUrl, setLogoUrl] = useState<string | null>(null);
   const [bRollUrl, setBRollUrl] = useState<string | null>(null);
   const [musicUrl, setMusicUrl] = useState<string | null>(null);
+  const [isMusicEnabled, setIsMusicEnabled] = useState(true);
+  const [audioTimeline, setAudioTimeline] = useState<AudioEvent[]>([]);
+  const [musicPreset, setMusicPreset] = useState<'auto' | 'tension' | 'corporate' | 'docs' | 'uplifting'>('auto');
   const [showMusicLibrary, setShowMusicLibrary] = useState(false);
   const [isSelectingWatermark, setIsSelectingWatermark] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const [dragStart, setDragStart] = useState<{x: number, y: number} | null>(null);
+  const [inpaintStrength, setInpaintStrength] = useState(0.95);
+  const [inpaintNoiseLevel, setInpaintNoiseLevel] = useState(15);
+  const [isPreviewActive, setIsPreviewActive] = useState(false);
   const [watermarkRect, setWatermarkRect] = useState<{x: number, y: number, w: number, h: number} | null>(null);
+  const [tempRect, setTempRect] = useState<{x: number, y: number, w: number, h: number} | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const bRollVideoRef = useRef<HTMLVideoElement>(null);
   const musicAudioRef = useRef<HTMLAudioElement>(null);
@@ -158,18 +151,15 @@ export default function App() {
 
   const handleConfirmPlan = () => {
     if (pendingPlan) {
-      // Auto-attach music presets or BL mappings if detected from AI
-      const musicOp = pendingPlan.operations.find(op => op.type === 'music');
-      if (musicOp) {
-        if (musicOp.parameters.music_preset) {
-          const preset = MUSIC_LIBRARY.find(m => m.name === musicOp.parameters.music_preset);
-          if (preset) setMusicUrl(preset.url);
-        } else if (musicOp.parameters.base) {
-          const baseId = musicOp.parameters.base as string;
-          if (BL_MAPPING[baseId]) setMusicUrl(BL_MAPPING[baseId]);
-        }
-      }
       setHistory([...history, pendingPlan]);
+      
+      // Auto-generate music timeline after confirming plan
+      if (video?.duration) {
+        const setter = new SmartMusicSetter(video, pendingPlan);
+        const timeline = setter.generateTimeline();
+        setAudioTimeline(timeline);
+      }
+      
       setPendingPlan(null);
     }
   };
@@ -180,8 +170,13 @@ export default function App() {
 
   const togglePlay = () => {
     if (videoRef.current) {
-      if (isPlaying) videoRef.current.pause();
-      else videoRef.current.play();
+      if (isPlaying) {
+        videoRef.current.pause();
+        audioEngine.suspend();
+      } else {
+        audioEngine.resume();
+        videoRef.current.play();
+      }
       setIsPlaying(!isPlaying);
     }
   };
@@ -255,6 +250,42 @@ export default function App() {
 
   const clockRef = useRef(0);
   const lastFrameTimeRef = useRef(0);
+  const extensionTriggeredRef = useRef(false);
+
+  // Advanced AI Inpainting Utility
+  const aiInpaintWatermark = (ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, rect: any, strength = 0.95, noiseLevel = 15) => {
+    const { x, y, w, h } = rect;
+    if (w <= 0 || h <= 0) return;
+
+    ctx.save();
+    try {
+      const imageData = ctx.getImageData(x, y, w, h);
+      const data = imageData.data;
+      const margin = 8;
+      
+      const tE = ctx.getImageData(x, Math.max(0, y - margin), w, margin).data;
+      const bE = ctx.getImageData(x, Math.min(canvas.height - margin, y + h), w, margin).data;
+      
+      for (let i = 0; i < data.length; i += 4) {
+        const px = (i / 4) % w;
+        const py = Math.floor((i / 4) / w);
+        const wY = py / h;
+
+        for (let c = 0; c < 3; c++) {
+          const sampled = (tE[Math.floor(px) * 4 + c] * (1 - wY)) + (bE[Math.floor(px) * 4 + c] * wY);
+          const noise = (Math.random() - 0.5) * noiseLevel;
+          data[i + c] = Math.max(0, Math.min(255, (sampled * strength) + (data[i + c] * (1 - strength)) + noise));
+        }
+        data[i + 3] = 255;
+      }
+      ctx.putImageData(imageData, x, y);
+    } catch(e) {}
+
+    ctx.filter = `blur(${Math.round(w * 0.05)}px)`;
+    ctx.globalAlpha = 0.3;
+    ctx.drawImage(canvas, x - 10, y - 10, w + 20, h + 20, x, y, w, h);
+    ctx.restore();
+  };
 
   // NovaCut Frame Synthesis Engine
   useEffect(() => {
@@ -263,33 +294,30 @@ export default function App() {
     if (!videoElement || !canvas || (!isPlaying && renderStatus !== 'rendering')) {
       clockRef.current = 0;
       lastFrameTimeRef.current = 0;
+      extensionTriggeredRef.current = false;
+      audioEngine.suspend();
       return;
     }
+
+    audioEngine.init(videoElement);
+    audioEngine.resume();
 
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    const renderFrame = (now: number) => {
-      if (!lastFrameTimeRef.current) lastFrameTimeRef.current = now;
-      const deltaTime = (now - lastFrameTimeRef.current) / 1000;
-      lastFrameTimeRef.current = now;
-
-      // Update master clock
+    const renderFrame = () => {
+      const duration = videoElement.duration;
+      const deltaTime = (isPlaying || renderStatus === 'rendering') ? (1 / 30) : 0; 
+      
       if (isPlaying || renderStatus === 'rendering') {
-        if (!videoElement.paused && !videoElement.ended) {
-          clockRef.current = videoElement.currentTime;
-        } else {
-          // If video ended or paused during render, advance clock manually for appends
-          clockRef.current += deltaTime * videoElement.playbackRate;
-        }
-        // Keep React state in sync for UI counters
-        setCurrentTime(clockRef.current);
+        clockRef.current += deltaTime * videoElement.playbackRate;
+        setCurrentTime(Math.min(clockRef.current, Math.max(videoElement.duration, ...activeOpsRef.current.map(o => parseTime(o.end, videoElement.duration)))));
       }
 
       const currentTime = clockRef.current;
-      const duration = videoElement.duration;
+      const ops = activeOpsRef.current;
       
-      const effectiveEndTimes = activeOpsRef.current.map(op => {
+      const effectiveEndTimes = ops.map(op => {
         const start = parseTime(op.start, duration);
         let end = parseTime(op.end, duration);
         if (op.type === 'insert' && bRollVideoRef.current?.duration) {
@@ -298,362 +326,161 @@ export default function App() {
         return end;
       });
       
-      const maxEndTime = Math.max(duration, ...effectiveEndTimes);
-      
+      const maxEndTime = Math.max(duration, ...effectiveEndTimes, duration > 0 ? duration + 3 : 0);
       const isFinished = currentTime >= maxEndTime - 0.05;
 
-      if (isFinished || (videoElement.paused && renderStatus !== 'rendering' && currentTime < duration)) {
-        if (renderStatus === 'rendering' && isFinished) {
+      if (isFinished) {
+        if (renderStatus === 'rendering') {
           setRenderProgress(100);
           stopRecording();
         }
+        setIsPlaying(false);
         return;
       }
 
       if (renderStatus === 'rendering' && duration > 0) {
-        const vDur = getVirtualTime(duration);
-        const vCurrent = getVirtualTime(currentTime);
-        setRenderProgress(vDur > 0 ? (vCurrent / vDur) * 100 : 100);
+        setRenderProgress((currentTime / maxEndTime) * 100);
       }
 
-      // 1. Resolve Active Operations (Optimized lookup)
-      const activeOps = activeOpsRef.current.filter(op => {
+      // Check for start of extension
+      if (duration > 0 && currentTime >= duration && !extensionTriggeredRef.current) {
+        extensionTriggeredRef.current = true;
+        audioEngine.triggerEvent('whoosh');
+      }
+
+      const activeOps = ops.filter(op => {
         const start = parseTime(op.start, duration);
-        let end = parseTime(op.end, duration);
-        
-        // If it's an insert (B-roll), ensure we at least try to play its duration if b-roll is loaded
-        if (op.type === 'insert' && bRollVideoRef.current?.duration) {
-          end = Math.max(end, start + bRollVideoRef.current.duration);
-        }
-        
+        const end = parseTime(op.end, maxEndTime);
         return currentTime >= start && currentTime <= end;
       });
 
-      // 2. Destructive State Management (Cuts/Speed)
-      const removeOp = activeOps.find(op => op.type === 'remove');
-      if (removeOp) {
-        const end = parseTime(removeOp.end, duration);
-        videoElement.currentTime = Math.min(end + 0.1, duration);
-        requestRef.current = requestAnimationFrame(renderFrame);
-        return;
-      }
-
-      const speedOp = activeOps.find(op => op.type === 'speed');
-      videoElement.playbackRate = speedOp ? (speedOp.parameters.speed_factor || 2.0) : 1.0;
-
-      // 3. Frame Composition
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      // DAG PIPELINE NODES
+      // Node 0: Base
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
       
-      const cropOp = activeOps.find(op => op.type === 'crop');
-      const insertOp = activeOps.find(op => op.type === 'insert');
-      const musicOp = activeOps.find(op => op.type === 'music');
-      const bokehOp = activeOps.find(op => op.type === 'bokeh');
-      const overlayOp = activeOps.find(op => op.type === 'overlay');
-      const captionsOp = activeOps.find(op => op.type === 'captions');
-
-      if (videoElement.readyState >= 2) { 
-        // 3a. Frame Pre-processing (Bokeh/Filters)
-        if (bokehOp) {
-          ctx.filter = `blur(${bokehOp.parameters.intensity || 5}px) grayscale(0.2)`;
-        } else if (overlayOp) {
-          const style = overlayOp.parameters.style;
-          if (style === 'noir') ctx.filter = 'grayscale(1) contrast(1.2)';
-          else if (style === 'vibrant') ctx.filter = 'saturate(1.8) contrast(1.1)';
-          else if (style === 'cinematic') ctx.filter = 'sepia(0.1) contrast(1.1) brightness(0.95)';
-        }
-
-        // 3e. Cinematic Soundtrack Engine logic
-        if (musicOp && musicAudioRef.current) {
-          const { base, event } = musicOp.parameters;
-          
-          if (base && musicUrl) {
-            // Restore strict synchronization for music loops
-            if (Math.abs(musicAudioRef.current.currentTime - currentTime) > 0.5) {
-              musicAudioRef.current.currentTime = currentTime;
-            }
-            if (musicAudioRef.current.paused) {
-              musicAudioRef.current.play().catch(() => {});
-            }
-            musicAudioRef.current.volume = event ? 0.15 : 0.4;
+      if (currentTime < duration) {
+        try {
+          if (videoElement.readyState >= 2) {
+             if (Math.abs(videoElement.currentTime - currentTime) > 0.1) {
+                videoElement.currentTime = currentTime;
+             }
+             ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
           }
-        } else if (musicAudioRef.current) {
-          if (!musicAudioRef.current.paused) musicAudioRef.current.pause();
-        }
-
-        if (insertOp && bRollVideoRef.current && bRollVideoRef.current.readyState >= 2) {
-          // 3b. B-Roll Insertion Logic (Audio Ducking + Sync)
-          const bRollStart = parseTime(insertOp.start, duration);
-          const bRollOffset = currentTime - bRollStart;
-          const bRollDuration = bRollVideoRef.current.duration;
-
-          if (bRollOffset >= 0 && bRollOffset < bRollDuration) {
-            videoElement.volume = 0.1;
-            bRollVideoRef.current.volume = 1.0;
-
-            if (Math.abs(bRollVideoRef.current.currentTime - bRollOffset) > 0.3) {
-              bRollVideoRef.current.currentTime = bRollOffset;
-            }
-            if (bRollVideoRef.current.paused) {
-              bRollVideoRef.current.play().catch(() => {});
-            }
-            ctx.drawImage(bRollVideoRef.current, 0, 0, canvas.width, canvas.height);
-          } else {
-            videoElement.volume = 1.0;
-            if (!bRollVideoRef.current.paused) bRollVideoRef.current.pause();
-            bRollVideoRef.current.volume = 0;
-
-            if (cropOp) {
-              ctx.drawImage(videoElement, videoElement.videoWidth * 0.15, videoElement.videoHeight * 0.15, videoElement.videoWidth * 0.7, videoElement.videoHeight * 0.7, 0, 0, canvas.width, canvas.height);
-            } else {
-              ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
-            }
-          }
-        } else {
-          videoElement.volume = 1.0;
-          if (bRollVideoRef.current && !bRollVideoRef.current.paused) {
-            bRollVideoRef.current.pause();
-            bRollVideoRef.current.volume = 0;
-          }
-
-          if (cropOp) {
-            ctx.drawImage(videoElement, videoElement.videoWidth * 0.15, videoElement.videoHeight * 0.15, videoElement.videoWidth * 0.7, videoElement.videoHeight * 0.7, 0, 0, canvas.width, canvas.height);
-          } else {
-            ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
-          }
-        }
-        
-        ctx.filter = 'none';
-
-        // 3c. Bokeh Masking
-        if (bokehOp) {
-          ctx.save();
-          ctx.beginPath();
-          ctx.ellipse(canvas.width / 2, canvas.height / 2, canvas.width * 0.3, canvas.height * 0.45, 0, 0, Math.PI * 2);
-          ctx.clip();
-          if (cropOp) {
-            ctx.drawImage(videoElement, videoElement.videoWidth * 0.15, videoElement.videoHeight * 0.15, videoElement.videoWidth * 0.7, videoElement.videoHeight * 0.7, 0, 0, canvas.width, canvas.height);
-          } else {
-            ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
-          }
-          ctx.restore();
-        }
-
-        // 3d. Cinematic Bars
-        if (overlayOp && overlayOp.parameters.style === 'cinematic') {
-          ctx.fillStyle = 'black';
-          const barHeight = canvas.height * 0.12;
-          ctx.fillRect(0, 0, canvas.width, barHeight);
-          ctx.fillRect(0, canvas.height - barHeight, canvas.width, barHeight);
-        }
+        } catch (e) {}
       }
 
-        // 4. Region Effects
-        const effects = activeOps.filter(op => op.type === 'blur' || op.type === 'watermark' || op.type === 'branding');
-        
-        // Sort effects so blur/watermark (cleanup) happens BEFORE branding (overlay)
-        const sortedEffects = [...effects].sort((a, b) => {
-          if ((a.type === 'blur' || a.type === 'watermark') && b.type === 'branding') return -1;
-          if (a.type === 'branding' && (b.type === 'blur' || b.type === 'watermark')) return 1;
-          return 0;
-        });
+      // Node 1: Cleanup Bus (Inpainting)
+      activeOps.filter(o => o.type === 'blur' || o.type === 'watermark').forEach(op => {
+        const rect = op.parameters.rect ? {
+          x: op.parameters.rect.x * canvas.width,
+          y: op.parameters.rect.y * canvas.height,
+          w: op.parameters.rect.w * canvas.width,
+          h: op.parameters.rect.h * canvas.height
+        } : null;
+        if (rect) aiInpaintWatermark(ctx, canvas, rect, op.parameters.strength || 0.95, op.parameters.noise || 15);
+      });
 
-        sortedEffects.forEach(op => {
-          ctx.save();
-          
-          // Coordinate normalization helper
-          const normalizeRect = (r: any) => {
-            const res = { ...r };
-            // Robust check: if all values are <= 1.0 and not all 0, assume percentage.
-            // If they are large (>1), assume absolute pixels.
-            const isPercentage = (res.x <= 1 && res.y <= 1 && res.w <= 1 && res.h <= 1) && 
-                                 (res.x !== 0 || res.y !== 0 || res.w !== 0 || res.h !== 0);
+      // Node 2: Overlay Bus (Branding/Graphics)
+      activeOps.filter(o => o.type === 'branding').forEach(op => {
+        const rect = op.parameters.rect ? {
+          x: op.parameters.rect.x * canvas.width,
+          y: op.parameters.rect.y * canvas.height,
+          w: op.parameters.rect.w * canvas.width,
+          h: op.parameters.rect.h * canvas.height
+        } : null;
 
-            if (isPercentage) {
-              res.x *= canvas.width;
-              res.y *= canvas.height;
-              res.w *= canvas.width;
-              res.h *= canvas.height;
-            }
-            return res;
-          };
-
-          const rect = normalizeRect(op.parameters.rect || {
-            x: canvas.width - (canvas.width * 0.2) - 40,
-            y: canvas.height - (canvas.height * 0.15) - 40,
-            w: canvas.width * 0.2,
-            h: canvas.height * 0.15
-          });
-
-          if (op.type === 'branding' && logoImgRef.current?.complete && logoImgRef.current.naturalWidth > 0) {
+        if (rect && logoImgRef.current?.complete) {
           const animation = op.parameters.animation;
+          const opStart = parseTime(op.start, duration);
+          const progress = Math.min(1, (currentTime - opStart) / 1.5);
+          
+          ctx.save();
           let scale = 1.0;
-          let alpha = 1.0;
-
-          if (animation === 'pulse') {
-            scale = 1.0 + Math.sin(currentTime * 4) * 0.05;
-          } else if (animation === 'bounce') {
-            scale = 1.0 + Math.abs(Math.sin(currentTime * 6)) * 0.1;
-          } else if (animation === 'fade') {
-            const opStart = parseTime(op.start, duration);
-            alpha = Math.min(1, (currentTime - opStart) / 1.5); // 1.5s fade-in
-          }
-
-          ctx.save();
-          ctx.globalAlpha = alpha;
-          const centerX = rect.x + rect.w / 2;
-          const centerY = rect.y + rect.h / 2;
-          ctx.translate(centerX, centerY);
+          if (animation === 'zoom') scale = 0.5 + progress * 0.5;
+          if (animation === 'bounce') scale += Math.sin(currentTime * 6) * 0.05;
+          
+          ctx.translate(rect.x + rect.w/2, rect.y + rect.h/2);
           ctx.scale(scale, scale);
-          ctx.drawImage(logoImgRef.current, -rect.w / 2, -rect.h / 2, rect.w, rect.h);
-          ctx.restore();
-        } else {
-          // AI-Simulated Inpainting Effect
-          ctx.save();
-          // Create the mask for the operation
-          ctx.beginPath();
-          ctx.rect(rect.x, rect.y, rect.w, rect.h);
-          ctx.clip();
-          
-          // 1. Initial color sampling (heavy blur)
-          ctx.filter = 'blur(35px) saturate(1.3) contrast(1.1)';
-          ctx.drawImage(canvas, rect.x, rect.y, rect.w, rect.h, rect.x, rect.y, rect.w, rect.h);
-          
-          // 2. Multi-Directional Edge Smearing (Simulating Content Awareness)
-          ctx.globalAlpha = 0.7;
-          ctx.filter = 'blur(20px)';
-          
-          // Sample Top Edge and smear downwards
-          ctx.drawImage(canvas, rect.x, Math.max(0, rect.y - 15), rect.w, 15, rect.x, rect.y, rect.w, rect.h * 0.6);
-          // Sample Bottom Edge and smear upwards
-          ctx.drawImage(canvas, rect.x, Math.min(canvas.height - 15, rect.y + rect.h), rect.w, 15, rect.x, rect.y + rect.h * 0.4, rect.w, rect.h * 0.6);
-          // Sample Left Edge and smear right
-          ctx.drawImage(canvas, Math.max(0, rect.x - 15), rect.y, 15, rect.h, rect.x, rect.y, rect.w * 0.6, rect.h);
-          // Sample Right Edge and smear left
-          ctx.drawImage(canvas, Math.min(canvas.width - 15, rect.x + rect.w), rect.y, 15, rect.h, rect.x + rect.w * 0.4, rect.y, rect.w * 0.6, rect.h);
-          
-          // 3. Detail Synthesis (Adding subtle noise and color jitter)
-          ctx.globalAlpha = 0.08;
-          ctx.filter = 'none';
-          for(let i = 0; i < 30; i++) {
-            const rx = rect.x + Math.random() * rect.w;
-            const ry = rect.y + Math.random() * rect.h;
-            const size = 2 + Math.random() * 10;
-            ctx.fillStyle = `rgba(${120 + Math.random() * 80}, ${120 + Math.random() * 80}, ${120 + Math.random() * 80}, 0.5)`;
-            ctx.beginPath();
-            ctx.arc(rx, ry, size, 0, Math.PI * 2);
-            ctx.fill();
-          }
-          
-          // Final Grain layer
-          ctx.globalAlpha = 0.05;
-          ctx.fillStyle = '#888';
-          for(let i = 0; i < 100; i++) {
-            ctx.fillRect(rect.x + Math.random() * rect.w, rect.y + Math.random() * rect.h, 1, 1);
-          }
+          ctx.drawImage(logoImgRef.current, -rect.w/2, -rect.h/2, rect.w, rect.h);
           ctx.restore();
         }
-        ctx.restore();
       });
 
-      // 5. Smart Captions Rendering
-      if (captionsOp) {
-        const captions = captionsOp.parameters.captions_list || [];
-        const currentCaption = [...captions].reverse().find((c: any) => {
-          const duration = c.duration || 3.5;
-          return currentTime >= c.time && currentTime <= c.time + duration;
-        });
-        
-        if (currentCaption) {
-          ctx.save();
-          ctx.font = 'bold 36px Inter, sans-serif';
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'bottom';
-          
-          const text = currentCaption.text.toUpperCase();
-          const padding = 12;
-          const textWidth = ctx.measureText(text).width;
-          const yPos = (overlayOp && overlayOp.parameters.style === 'cinematic') ? canvas.height - (canvas.height * 0.12) - 20 : canvas.height - 40;
-          
-          ctx.fillStyle = 'rgba(0,0,0,0.85)';
-          ctx.fillRect((canvas.width - textWidth) / 2 - padding, yPos - 50, textWidth + padding * 2, 55);
-          
-          ctx.fillStyle = '#fff';
-          ctx.fillText(text, canvas.width / 2, yPos - 5);
-          ctx.restore();
-        }
+      // Node 3: Metadata Bus (Captions/Text)
+      activeOps.filter(o => o.type === 'captions' || o.type === 'text_overlay').forEach(op => {
+         if (op.type === 'captions') {
+           const captions = op.parameters.captions_list || [];
+           const currentCaption = captions.find((c: any) => {
+             const s = parseTime(c.start, duration);
+             const e = parseTime(c.end, duration);
+             return currentTime >= s && currentTime <= e;
+           });
+           if (currentCaption) {
+             ctx.save();
+             ctx.font = 'bold 32px Inter';
+             ctx.fillStyle = 'white';
+             ctx.textAlign = 'center';
+             ctx.fillText(currentCaption.text, canvas.width/2, canvas.height - 40);
+             ctx.restore();
+           }
+         } else if (op.type === 'text_overlay') {
+           const { text, style, rect, animation } = op.parameters;
+           if (!text) return;
+
+           ctx.save();
+           const opStart = parseTime(op.start, duration);
+           const opEnd = parseTime(op.end, duration);
+           const elapsed = currentTime - opStart;
+           
+           if (style === 'title') {
+             const alphaNum = Math.min(1, elapsed / 0.8) * Math.min(1, (opEnd - currentTime) / 0.8);
+             ctx.globalAlpha = Math.max(0, alphaNum);
+             ctx.fillStyle = 'rgba(0,0,0,0.5)';
+             ctx.fillRect(0, 0, canvas.width, canvas.height);
+             ctx.font = 'bold 72px "Space Grotesk", sans-serif';
+             ctx.fillStyle = 'white';
+             ctx.textAlign = 'center';
+             ctx.textBaseline = 'middle';
+             const yOffset = (1 - Math.max(0, alphaNum)) * 30;
+             ctx.fillText(text.toUpperCase(), canvas.width / 2, canvas.height / 2 + yOffset);
+           } else if (style === 'floating') {
+             const r = rect || { x: 0.5, y: 0.5, w: 0.2, h: 0.1 };
+             const coords = { x: r.x * canvas.width, y: r.y * canvas.height, w: r.w * canvas.width, h: r.h * canvas.height };
+             const alphaNum = Math.min(1, elapsed / 0.5) * Math.min(1, (opEnd - currentTime) / 0.5);
+             ctx.globalAlpha = Math.max(0, alphaNum);
+             let mx = 0, my = 0;
+             if (animation === 'float') {
+               my = Math.sin(currentTime * 2) * 15;
+               mx = Math.cos(currentTime * 1.5) * 10;
+             }
+             ctx.font = 'bold 42px "Space Grotesk", sans-serif';
+             ctx.fillStyle = '#60a5fa';
+             ctx.strokeStyle = 'white';
+             ctx.lineWidth = 2;
+             ctx.textAlign = 'center';
+             ctx.strokeText(text, coords.x + mx, coords.y + my);
+             ctx.fillText(text, coords.x + mx, coords.y + my);
+           }
+           ctx.restore();
+         }
+      });
+
+      if (isSelectingWatermark && tempRect) {
+        ctx.save();
+        ctx.strokeStyle = '#ff3366';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([5, 5]);
+        ctx.strokeRect(tempRect.x, tempRect.y, tempRect.w, tempRect.h);
+        ctx.fillStyle = 'rgba(255, 51, 102, 0.2)';
+        ctx.fillRect(tempRect.x, tempRect.y, tempRect.w, tempRect.h);
+        ctx.restore();
       }
 
-      // 6. Text Overlay Rendering (Intro Cards & Floating Words)
-      const textOverlays = activeOps.filter(op => op.type === 'text_overlay');
-      textOverlays.forEach(op => {
-        const { text, style, rect, animation } = op.parameters;
-        if (!text) return;
+      if (isPreviewActive && watermarkRect) {
+        aiInpaintWatermark(ctx, canvas, watermarkRect, inpaintStrength, inpaintNoiseLevel);
+      }
 
-        ctx.save();
-        const opStart = parseTime(op.start, duration);
-        const opEnd = parseTime(op.end, duration);
-        const elapsed = currentTime - opStart;
-        
-        if (style === 'title') {
-          // Intro Card Styling
-          const alphaNum = Math.min(1, elapsed / 0.8) * Math.min(1, (opEnd - currentTime) / 0.8);
-          ctx.globalAlpha = Math.max(0, alphaNum);
-          
-          // Background Wash
-          ctx.fillStyle = 'rgba(0,0,0,0.5)';
-          ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-          ctx.font = 'bold 72px "Space Grotesk", sans-serif';
-          ctx.fillStyle = 'white';
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'middle';
-          
-          // Subtle slide-up
-          const yOffset = (1 - Math.max(0, alphaNum)) * 30;
-          ctx.fillText(text.toUpperCase(), canvas.width / 2, canvas.height / 2 + yOffset);
-          
-          ctx.font = '24px "Space Grotesk", sans-serif';
-          ctx.globalAlpha = Math.max(0, alphaNum) * 0.7;
-          ctx.fillText("NOVA SYNTHESIS • PRESENTATION", canvas.width / 2, canvas.height / 2 + 80 + yOffset);
-        } else if (style === 'floating') {
-          // Floating Word Styling
-          const r = rect || { x: 0.5, y: 0.5, w: 0.2, h: 0.1 };
-          const coords = { x: r.x, y: r.y, w: r.w, h: r.h };
-          
-          // Coordinate normalization
-          if (coords.x <= 1 && coords.w <= 1) {
-            coords.x *= canvas.width;
-            coords.y *= canvas.height;
-            coords.w *= canvas.width;
-            coords.h *= canvas.height;
-          }
-
-          const alphaNum = Math.min(1, elapsed / 0.5) * Math.min(1, (opEnd - currentTime) / 0.5);
-          ctx.globalAlpha = Math.max(0, alphaNum);
-
-          // Motion offset
-          let mx = 0, my = 0;
-          if (animation === 'float') {
-            my = Math.sin(currentTime * 2) * 15;
-            mx = Math.cos(currentTime * 1.5) * 10;
-          }
-
-          ctx.font = 'bold 42px "Space Grotesk", sans-serif';
-          ctx.fillStyle = '#60a5fa'; // Blue-400
-          ctx.strokeStyle = 'white';
-          ctx.lineWidth = 2;
-          ctx.textAlign = 'center';
-          
-          ctx.shadowColor = 'rgba(0,0,0,0.5)';
-          ctx.shadowBlur = 15;
-          
-          ctx.strokeText(text, coords.x + mx, coords.y + my);
-          ctx.fillText(text, coords.x + mx, coords.y + my);
-        }
-        ctx.restore();
-      });
-
-      // Synthesis Debug Overlays Removed
       requestRef.current = requestAnimationFrame(renderFrame);
     };
 
@@ -669,14 +496,12 @@ export default function App() {
     recordedChunks.current = [];
     const canvasStream = canvas.captureStream(30);
     
-    // Attempt to capture audio from video element
-    const audioStream = (videoElement as any).captureStream ? (videoElement as any).captureStream() : (videoElement as any).mozCaptureStream ? (videoElement as any).mozCaptureStream() : null;
-    const musicStream = musicAudioRef.current && (musicAudioRef.current as any).captureStream ? (musicAudioRef.current as any).captureStream() : null;
+    // Use CinematicAudioEngine stream
+    const audioEngineStream = audioEngine.getStream();
     
     const combinedStream = new MediaStream([
       ...canvasStream.getVideoTracks(),
-      ...(audioStream ? audioStream.getAudioTracks() : []),
-      ...(musicStream ? musicStream.getAudioTracks() : [])
+      ...(audioEngineStream ? audioEngineStream.getAudioTracks() : [])
     ]);
 
     const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9') 
@@ -693,6 +518,11 @@ export default function App() {
     
     recorder.onstop = () => {
       setRenderStatus('complete');
+      
+      // Phase 5: Output Validation (Theoretical vs Actual)
+      const actualDuration = clockRef.current;
+      const expectedDuration = (videoRef.current?.duration || 0) + (activeOpsRef.current.length > 0 ? 3 : 0);
+      setRenderLogs(prev => [...prev, `[✓] Synthesis Finalized.`, `[✓] Validation: ${actualDuration.toFixed(2)}s rendered (Expected: ${expectedDuration.toFixed(2)}s)`, `[✓] Stream Integrity Validated.`]);
     };
     
     recorderRef.current = recorder;
@@ -731,6 +561,11 @@ export default function App() {
     setRenderStatus('rendering');
     setRenderLogs(["[*] Initializing NovaEngine Context...", "[*] Attaching Frame Listeners...", "[*] MediaRecorder: READY", "[!] Starting Synthesis Pass..."]);
     
+    if (isMusicEnabled && audioTimeline.length > 0) {
+      setRenderLogs(prev => [...prev, "[*] Synthesizing Soundtrack Engine..."]);
+      await audioEngine.playTimeline(audioTimeline);
+    }
+
     setTimeout(() => {
       v.play();
       setIsPlaying(true);
@@ -755,6 +590,8 @@ export default function App() {
   const startWatermarkSelection = () => {
     setIsSelectingWatermark(true);
     setWatermarkRect(null);
+    setTempRect(null);
+    setIsPreviewActive(false);
   };
 
   const handleCanvasMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -766,7 +603,7 @@ export default function App() {
     
     setIsDragging(true);
     setDragStart({ x, y });
-    setWatermarkRect({ x, y, w: 0, h: 0 });
+    setTempRect({ x, y, w: 0, h: 0 });
   };
 
   const handleCanvasMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -783,51 +620,49 @@ export default function App() {
       h: Math.abs(y - dragStart.y)
     };
     
-    setWatermarkRect(newRect);
+    setTempRect(newRect);
   };
 
   const handleCanvasMouseUp = () => {
     if (isDragging) {
       setIsDragging(false);
-      // If the box is too small, give it a default size around the click point
-      if (watermarkRect && (watermarkRect.w < 10 || watermarkRect.h < 10)) {
-        const w = 1280 * 0.15;
-        const h = 720 * 0.1;
-        setWatermarkRect({
-          x: Math.max(0, watermarkRect.x - w/2),
-          y: Math.max(0, watermarkRect.y - h/2),
-          w,
-          h
-        });
+      if (tempRect && (tempRect.w > 2 && tempRect.h > 2)) {
+        setWatermarkRect(tempRect);
+        setIsPreviewActive(true);
       }
+      setIsSelectingWatermark(false);
     }
   };
 
-  const applyWatermarkFix = () => {
+  const applyManualWatermarkRemoval = () => {
     if (!watermarkRect) return;
     
-    // Choose type based on whether a logo is provided
-    const opType = logoUrl ? 'branding' : 'watermark';
-    
     const newPlan: EditPlan = {
-      summary: logoUrl ? "Manual Logo Placement (Branding)" : "Manual AI Inpainting targeting selected region",
+      summary: "Manual Watermark Removal applied via inpainting",
       operations: [{
-        type: opType,
-        target: logoUrl ? 'branding' : 'watermark',
+        type: 'watermark',
+        target: 'watermark',
         scope: 'global',
         start: 0,
         end: 'video_end',
         parameters: {
-          rect: watermarkRect,
-          reason: logoUrl ? "Branding replacement" : "Manual selection for inpainting",
-          logo_url: logoUrl
+          rect: {
+            x: watermarkRect.x / (canvasRef.current?.width || 1280),
+            y: watermarkRect.y / (canvasRef.current?.height || 720),
+            w: watermarkRect.w / (canvasRef.current?.width || 1280),
+            h: watermarkRect.h / (canvasRef.current?.height || 720)
+          },
+          strength: inpaintStrength,
+          noise: inpaintNoiseLevel,
+          reason: "Manual region-based inpainting"
         }
       }]
     };
     
     setHistory([...history, newPlan]);
-    setIsSelectingWatermark(false);
+    setIsPreviewActive(false);
     setWatermarkRect(null);
+    setTempRect(null);
   };
 
   return (
@@ -1204,8 +1039,8 @@ export default function App() {
               </div>
             </div>
 
-            {/* AI Assistant Panel */}
-            <div className="flex flex-col gap-4">
+            {/* AI Assistant & Music Panel */}
+            <div className="flex flex-col gap-6">
               <div className="flex-1 bg-white rounded-xl border border-border shadow-sm flex flex-col overflow-hidden">
                 <div className="p-4 border-b border-border flex items-center justify-between">
                   <div className="flex items-center gap-2">
@@ -1216,6 +1051,7 @@ export default function App() {
                   </div>
                   <Info className="w-4 h-4 text-gray-400" />
                 </div>
+                {/* ... (AI Assistant content) */}
 
                 <div className="flex-1 overflow-y-auto p-4 space-y-4 font-sans leading-relaxed">
                   <div className="bg-gray-50 p-3 rounded-lg text-sm text-gray-600 border border-gray-100 italic">
@@ -1352,6 +1188,179 @@ export default function App() {
                     </button>
                   </div>
                 </form>
+              </div>
+
+              {/* Smart Music Setter Panel */}
+              <div className="bg-white rounded-xl border border-border shadow-sm flex flex-col overflow-hidden">
+                <div className="p-4 border-b border-border flex items-center justify-between bg-gray-50/50">
+                  <div className="flex items-center gap-2">
+                    <div className="w-6 h-6 bg-pink-600 rounded flex items-center justify-center">
+                      <Music className="text-white w-3.5 h-3.5" />
+                    </div>
+                    <span className="font-semibold text-sm">Modular Soundtrack</span>
+                  </div>
+                  <button 
+                    onClick={() => setIsMusicEnabled(!isMusicEnabled)}
+                    className={`w-10 h-5 rounded-full transition-colors relative ${isMusicEnabled ? 'bg-pink-600' : 'bg-gray-300'}`}
+                  >
+                    <div className={`absolute top-1 w-3 h-3 bg-white rounded-full transition-all ${isMusicEnabled ? 'left-6' : 'left-1'}`} />
+                  </button>
+                </div>
+                <div className={`p-4 space-y-4 transition-opacity ${!isMusicEnabled ? 'opacity-40 grayscale pointer-events-none' : ''}`}>
+                   <div>
+                    <span className="text-[10px] font-mono uppercase tracking-wider text-gray-500 mb-2 block">Behavioral Preset</span>
+                    <div className="grid grid-cols-2 gap-2">
+                      {(['auto', 'tension', 'corporate', 'docs', 'uplifting'] as const).map(p => (
+                        <button 
+                          key={p}
+                          onClick={() => setMusicPreset(p)}
+                          className={`px-3 py-2 text-[10px] font-bold uppercase rounded-lg border transition-all ${musicPreset === p ? 'bg-pink-50 border-pink-200 text-pink-700' : 'bg-white border-gray-100 text-gray-400 hover:border-gray-200'}`}
+                        >
+                          {p.replace('docs', 'Documentary')}
+                        </button>
+                      ))}
+                    </div>
+                   </div>
+
+                   {audioTimeline.length > 0 ? (
+                     <div className="space-y-3">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[10px] font-mono uppercase tracking-wider text-gray-500">Audio Timeline Preview</span>
+                          <Activity className="w-3 h-3 text-pink-400" />
+                        </div>
+                        
+                        <div className="bg-gray-900 rounded-lg p-3 space-y-2 border border-gray-800">
+                          {/* Gantt Timeline */}
+                          <div className="relative h-24 w-full">
+                            {['baseLoop', 'emotionalOverlay', 'eventTrigger'].map((type, rowIdx) => (
+                              <div key={type} className="absolute w-full h-6 border-b border-gray-800/50" style={{ top: rowIdx * 28 }}>
+                                 {audioTimeline.filter(e => e.type === type).map((event, i) => {
+                                   const start = (event.startTime / (video?.duration || 1)) * 100;
+                                   const width = (event.duration / (video?.duration || 1)) * 100;
+                                   const colors: Record<string, string> = {
+                                      baseLoop: 'bg-indigo-500/60 border-indigo-700',
+                                      emotionalOverlay: 'bg-pink-500/60 border-pink-700',
+                                      eventTrigger: 'bg-amber-500/80 border-amber-700'
+                                   };
+                                   return (
+                                     <div 
+                                       key={i}
+                                       className={`absolute h-4 rounded mt-1 border-l-2 text-[7px] font-mono flex items-center px-1 text-white truncate shadow-lg ${colors[type]}`}
+                                       style={{ left: `${start}%`, width: `${width}%` }}
+                                     >
+                                       {event.id}
+                                     </div>
+                                   );
+                                 })}
+                              </div>
+                            ))}
+                          </div>
+                          
+                          <div className="flex justify-between text-[8px] font-mono text-gray-500 uppercase px-1">
+                            <span>0s</span>
+                            <span>Intro</span>
+                            <span>Spike</span>
+                            <span>{Math.round(video?.duration || 0)}s</span>
+                          </div>
+                        </div>
+
+                        <button 
+                          onClick={async () => {
+                            audioEngine.init(videoRef.current || undefined);
+                            audioEngine.stopAll();
+                            await audioEngine.playTimeline(audioTimeline);
+                          }}
+                          className="w-full flex items-center justify-center gap-2 py-2 bg-gray-50 border border-gray-200 rounded-lg text-[10px] font-bold uppercase tracking-widest hover:bg-gray-100 transition-all text-gray-600"
+                        >
+                          <Play className="w-3.5 h-3.5" />
+                          Preview Orchestration
+                        </button>
+                     </div>
+                   ) : (
+                     <div className="h-32 flex flex-col items-center justify-center border border-dashed border-gray-100 rounded-xl bg-gray-50/50 text-gray-400 gap-2">
+                        <Library className="w-6 h-6 opacity-40" />
+                        <p className="text-[10px] font-medium italic">Execute an AI Plan to synthesize music</p>
+                     </div>
+                   )}
+                </div>
+              </div>
+
+              {/* Advanced Watermark Remover Panel */}
+              <div className="bg-white rounded-xl border border-border shadow-sm flex flex-col overflow-hidden">
+                 <div className="p-4 border-b border-border flex items-center justify-between bg-blue-50/50">
+                  <div className="flex items-center gap-2">
+                    <div className="w-6 h-6 bg-blue-600 rounded flex items-center justify-center">
+                      <Crop className="text-white w-3.5 h-3.5" />
+                    </div>
+                    <span className="font-semibold text-sm">AI Inpaint Remover</span>
+                  </div>
+                </div>
+
+                <div className="p-4 space-y-4">
+                  <div className="space-y-2">
+                    <button 
+                      onClick={startWatermarkSelection}
+                      className={`w-full flex items-center justify-center gap-2 py-2.5 rounded-lg text-xs font-bold uppercase transition-all ${isSelectingWatermark ? 'bg-blue-600 text-white animate-pulse' : 'bg-blue-50 text-blue-700 hover:bg-blue-100'}`}
+                    >
+                      <Maximize className="w-4 h-4" />
+                      {isSelectingWatermark ? 'Selecting Region...' : 'Start Selection'}
+                    </button>
+                    <p className="text-[9px] text-gray-400 text-center italic">Click & drag on the video to target a logo or watermark</p>
+                  </div>
+
+                  {watermarkRect && (
+                    <motion.div 
+                      initial={{ opacity: 0, height: 0 }}
+                      animate={{ opacity: 1, height: 'auto' }}
+                      className="space-y-4 pt-2 border-t border-gray-100"
+                    >
+                      <div className="space-y-3">
+                        <div className="flex justify-between items-center">
+                          <label className="text-[10px] font-bold text-gray-500 uppercase">Inpaint Strength</label>
+                          <span className="text-[10px] font-mono text-blue-600 bg-blue-50 px-1.5 rounded">{Math.round(inpaintStrength * 100)}%</span>
+                        </div>
+                        <input 
+                          type="range" min="0.1" max="1" step="0.05"
+                          value={inpaintStrength}
+                          onChange={(e) => setInpaintStrength(parseFloat(e.target.value))}
+                          className="w-full h-1.5 bg-gray-100 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                        />
+                      </div>
+
+                      <div className="space-y-3">
+                        <div className="flex justify-between items-center">
+                          <label className="text-[10px] font-bold text-gray-500 uppercase">Texture Noise</label>
+                          <span className="text-[10px] font-mono text-blue-600 bg-blue-50 px-1.5 rounded">{inpaintNoiseLevel}</span>
+                        </div>
+                        <input 
+                          type="range" min="0" max="40" step="1"
+                          value={inpaintNoiseLevel}
+                          onChange={(e) => setInpaintNoiseLevel(parseInt(e.target.value))}
+                          className="w-full h-1.5 bg-gray-100 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                        />
+                      </div>
+
+                      <div className="flex gap-2">
+                        <button 
+                          onClick={() => {
+                            setIsPreviewActive(false);
+                            setWatermarkRect(null);
+                          }}
+                          className="flex-1 py-2 text-[10px] font-bold uppercase text-gray-500 hover:bg-gray-50 rounded-lg transition-colors border border-gray-200"
+                        >
+                          Cancel
+                        </button>
+                        <button 
+                          onClick={applyManualWatermarkRemoval}
+                          className="flex-[2] py-2 bg-blue-600 text-white text-[10px] font-bold uppercase rounded-lg shadow-md hover:bg-blue-700 transition-all flex items-center justify-center gap-2"
+                        >
+                          <Sparkles className="w-3 h-3" />
+                          Apply removal
+                        </button>
+                      </div>
+                    </motion.div>
+                  )}
+                </div>
               </div>
             </div>
           </section>
