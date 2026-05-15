@@ -6,8 +6,8 @@ export interface VideoMetadata {
 }
 
 export interface EditOperation {
-  type: 'remove' | 'speed' | 'crop' | 'blur' | 'stabilize' | 'watermark' | 'highlight' | 'branding' | 'captions' | 'insert' | 'bokeh' | 'overlay' | 'music';
-  target: 'silence' | 'watermark' | 'low_activity' | 'frame' | 'branding' | 'subtitle' | 'b_roll' | 'background' | 'cinematic' | 'audio_track';
+  type: 'remove' | 'speed' | 'crop' | 'blur' | 'stabilize' | 'watermark' | 'highlight' | 'branding' | 'captions' | 'insert' | 'bokeh' | 'overlay' | 'music' | 'avatar';
+  target: 'silence' | 'watermark' | 'low_activity' | 'frame' | 'branding' | 'subtitle' | 'b_roll' | 'background' | 'cinematic' | 'audio_track' | 'talking_head';
   start: string | number;
   end: string | number;
   scope: 'local' | 'global';

@@ -50,6 +50,7 @@ export default function App() {
   const [renderLogs, setRenderLogs] = useState<string[]>([]);
   const [chatInput, setChatInput] = useState("");
   const [logoUrl, setLogoUrl] = useState<string | null>(null);
+  const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
   const [bRollUrl, setBRollUrl] = useState<string | null>(null);
   const [musicUrl, setMusicUrl] = useState<string | null>(null);
   const [isMusicEnabled, setIsMusicEnabled] = useState(true);
@@ -69,6 +70,7 @@ export default function App() {
   const musicAudioRef = useRef<HTMLAudioElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const logoImgRef = useRef<HTMLImageElement | null>(null);
+  const avatarImgRef = useRef<HTMLImageElement | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recordedChunks = useRef<Blob[]>([]);
   const requestRef = useRef<number>(0);
@@ -119,6 +121,18 @@ export default function App() {
       img.crossOrigin = "anonymous";
       img.src = url;
       logoImgRef.current = img;
+    }
+  };
+
+  const handleAvatarUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const url = URL.createObjectURL(file);
+      setAvatarUrl(url);
+      const img = new Image();
+      img.crossOrigin = "anonymous";
+      img.src = url;
+      avatarImgRef.current = img;
     }
   };
 
@@ -381,8 +395,8 @@ export default function App() {
         if (rect) aiInpaintWatermark(ctx, canvas, rect, op.parameters.strength || 0.95, op.parameters.noise || 15);
       });
 
-      // Node 2: Overlay Bus (Branding/Graphics)
-      activeOps.filter(o => o.type === 'branding').forEach(op => {
+      // Node 2: Overlay Bus (Branding/Graphics/Avatar)
+      activeOps.filter(o => o.type === 'branding' || o.type === 'avatar').forEach(op => {
         const rect = op.parameters.rect ? {
           x: op.parameters.rect.x * canvas.width,
           y: op.parameters.rect.y * canvas.height,
@@ -390,7 +404,7 @@ export default function App() {
           h: op.parameters.rect.h * canvas.height
         } : null;
 
-        if (rect && logoImgRef.current?.complete) {
+        if (op.type === 'branding' && rect && logoImgRef.current?.complete) {
           const animation = op.parameters.animation;
           const opStart = parseTime(op.start, duration);
           const progress = Math.min(1, (currentTime - opStart) / 1.5);
@@ -403,6 +417,64 @@ export default function App() {
           ctx.translate(rect.x + rect.w/2, rect.y + rect.h/2);
           ctx.scale(scale, scale);
           ctx.drawImage(logoImgRef.current, -rect.w/2, -rect.h/2, rect.w, rect.h);
+          ctx.restore();
+        }
+
+        if (op.type === 'avatar' && rect && avatarImgRef.current?.complete) {
+          ctx.save();
+
+          // Audio frequency analysis for lip-sync
+          const freqData = audioEngine.getAudioFrequencyData();
+          let avgVol = 0;
+          if (freqData) {
+             let sum = 0;
+             // Sample human voice range frequencies (roughly mid-low bins)
+             const startBin = 2;
+             const endBin = 15;
+             for(let i = startBin; i < endBin; i++) sum += freqData[i];
+             avgVol = sum / (endBin - startBin);
+          }
+
+          // Map volume to a "jaw drop" scale factor (1.0 to 1.15)
+          const mouthScaleY = 1.0 + (avgVol / 255) * 0.15;
+
+          // Draw Avatar
+          ctx.translate(rect.x + rect.w/2, rect.y + rect.h/2);
+
+          // Subtle natural idle head bob
+          const idleY = Math.sin(currentTime * 2) * 2;
+          ctx.translate(0, idleY);
+
+          // Clip path for rounded avatar (optional, makes it look cleaner like PiP)
+          ctx.beginPath();
+          ctx.arc(0, 0, Math.min(rect.w, rect.h)/2, 0, Math.PI * 2);
+          ctx.closePath();
+          ctx.clip();
+
+          // We draw the image in two halves. Top half static, bottom half scales with audio to simulate jaw movement.
+          // Top Half
+          ctx.drawImage(avatarImgRef.current,
+             0, 0, avatarImgRef.current.width, avatarImgRef.current.height / 2, // Source
+             -rect.w/2, -rect.h/2, rect.w, rect.h / 2 // Dest
+          );
+
+          // Bottom Half (The jaw)
+          ctx.save();
+          ctx.scale(1, mouthScaleY);
+          ctx.drawImage(avatarImgRef.current,
+             0, avatarImgRef.current.height / 2, avatarImgRef.current.width, avatarImgRef.current.height / 2, // Source
+             -rect.w/2, 0, rect.w, rect.h / 2 // Dest
+          );
+          ctx.restore();
+
+          // Draw "LIP_SYNC_ACTIVE" debug pulse if talking
+          if (avgVol > 30) {
+             ctx.beginPath();
+             ctx.arc(-rect.w/2 + 15, rect.h/2 - 15, 5 + (avgVol/255)*5, 0, Math.PI*2);
+             ctx.fillStyle = '#10b981';
+             ctx.fill();
+          }
+
           ctx.restore();
         }
       });
@@ -708,6 +780,21 @@ export default function App() {
                   onChange={handleLogoUpload}
                 />
                 {logoUrl && <div className="absolute right-3 w-4 h-4 rounded-full bg-blue-500 flex items-center justify-center"><CheckCircle2 className="w-2.5 h-2.5 text-white" /></div>}
+              </button>
+
+              <button className="w-full flex items-center gap-3 p-3 rounded-xl border border-dashed border-gray-100 bg-gray-50/10 hover:bg-white hover:border-emerald-200 transition-all text-gray-600 relative overflow-hidden group">
+                <Upload className="w-4 h-4 text-gray-400 group-hover:text-emerald-600 transition-colors" />
+                <div className="text-left">
+                  <p className="text-xs font-bold">{avatarUrl ? 'Avatar Uploaded' : 'Upload Avatar'}</p>
+                  <p className="text-[10px] opacity-70 italic font-mono">Reference Asset</p>
+                </div>
+                <input
+                  type="file"
+                  accept="image/*"
+                  className="absolute inset-0 opacity-0 cursor-pointer"
+                  onChange={handleAvatarUpload}
+                />
+                {avatarUrl && <div className="absolute right-3 w-4 h-4 rounded-full bg-emerald-500 flex items-center justify-center"><CheckCircle2 className="w-2.5 h-2.5 text-white" /></div>}
               </button>
 
               <button className="w-full flex items-center gap-3 p-3 rounded-xl border border-dashed border-gray-100 bg-gray-50/10 hover:bg-white hover:border-pink-200 transition-all text-gray-600 relative overflow-hidden group">
@@ -1411,6 +1498,12 @@ export default function App() {
                 title="Smart Titles"
                 desc="Create an intro title card and floating keywords for key incidents."
                 onClick={() => setChatInput("Create a professional intro title card and add floating keywords whenever company names or key incidents are mentioned in the video.")}
+              />
+              <AutomationPreset
+                icon={<Activity className="w-5 h-5 text-emerald-600" />}
+                title="Generative Avatar"
+                desc="Place the uploaded avatar in the bottom right corner with real-time lip sync."
+                onClick={() => setChatInput("Overlay the avatar in the bottom right corner with lip sync.")}
               />
             </div>
           </section>
