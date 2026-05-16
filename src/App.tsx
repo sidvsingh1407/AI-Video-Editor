@@ -252,6 +252,15 @@ export default function App() {
   const lastFrameTimeRef = useRef(0);
   const extensionTriggeredRef = useRef(false);
 
+  // Perf Cache
+  const effectiveEndTimesCacheRef = useRef<number[]>([]);
+  const maxEndTimeCacheRef = useRef<number>(0);
+  const cacheDependenciesRef = useRef<{
+    ops: EditOperation[];
+    duration: number;
+    bRollDuration: number | undefined;
+  }>({ ops: [], duration: -1, bRollDuration: undefined });
+
   // Advanced AI Inpainting Utility
   const aiInpaintWatermark = (ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, rect: any, strength = 0.95, noiseLevel = 15) => {
     const { x, y, w, h } = rect;
@@ -317,16 +326,33 @@ export default function App() {
       const currentTime = clockRef.current;
       const ops = activeOpsRef.current;
       
-      const effectiveEndTimes = ops.map(op => {
-        const start = parseTime(op.start, duration);
-        let end = parseTime(op.end, duration);
-        if (op.type === 'insert' && bRollVideoRef.current?.duration) {
-          end = Math.max(end, start + bRollVideoRef.current.duration);
-        }
-        return end;
-      });
+      const bRollDuration = bRollVideoRef.current?.duration;
+      const deps = cacheDependenciesRef.current;
+
+      let effectiveEndTimes = effectiveEndTimesCacheRef.current;
+      let maxEndTime = maxEndTimeCacheRef.current;
+
+      if (
+        deps.ops !== ops ||
+        deps.duration !== duration ||
+        deps.bRollDuration !== bRollDuration
+      ) {
+        effectiveEndTimes = ops.map(op => {
+          const start = parseTime(op.start, duration);
+          let end = parseTime(op.end, duration);
+          if (op.type === 'insert' && bRollDuration) {
+            end = Math.max(end, start + bRollDuration);
+          }
+          return end;
+        });
+
+        maxEndTime = Math.max(duration, ...effectiveEndTimes, duration > 0 ? duration + 3 : 0);
+
+        effectiveEndTimesCacheRef.current = effectiveEndTimes;
+        maxEndTimeCacheRef.current = maxEndTime;
+        cacheDependenciesRef.current = { ops, duration, bRollDuration };
+      }
       
-      const maxEndTime = Math.max(duration, ...effectiveEndTimes, duration > 0 ? duration + 3 : 0);
       const isFinished = currentTime >= maxEndTime - 0.05;
 
       if (isFinished) {
