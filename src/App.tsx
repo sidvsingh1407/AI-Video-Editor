@@ -266,17 +266,25 @@ export default function App() {
       const tE = ctx.getImageData(x, Math.max(0, y - margin), w, margin).data;
       const bE = ctx.getImageData(x, Math.min(canvas.height - margin, y + h), w, margin).data;
       
+      let px = 0;
+      let py = 0;
       for (let i = 0; i < data.length; i += 4) {
-        const px = (i / 4) % w;
-        const py = Math.floor((i / 4) / w);
         const wY = py / h;
+        const invWY = 1 - wY;
+        const pIdx = px * 4;
 
         for (let c = 0; c < 3; c++) {
-          const sampled = (tE[Math.floor(px) * 4 + c] * (1 - wY)) + (bE[Math.floor(px) * 4 + c] * wY);
+          const sampled = (tE[pIdx + c] * invWY) + (bE[pIdx + c] * wY);
           const noise = (Math.random() - 0.5) * noiseLevel;
           data[i + c] = Math.max(0, Math.min(255, (sampled * strength) + (data[i + c] * (1 - strength)) + noise));
         }
         data[i + 3] = 255;
+
+        px++;
+        if (px >= w) {
+          px = 0;
+          py++;
+        }
       }
       ctx.putImageData(imageData, x, y);
     } catch(e) {}
