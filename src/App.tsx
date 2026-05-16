@@ -279,7 +279,9 @@ export default function App() {
         data[i + 3] = 255;
       }
       ctx.putImageData(imageData, x, y);
-    } catch(e) {}
+    } catch(e) {
+      console.warn("Inpainting failed, possibly due to cross-origin data:", e);
+    }
 
     ctx.filter = `blur(${Math.round(w * 0.05)}px)`;
     ctx.globalAlpha = 0.3;
@@ -367,7 +369,9 @@ export default function App() {
              }
              ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
           }
-        } catch (e) {}
+        } catch (e) {
+          console.error("Video rendering error:", e);
+        }
       }
 
       // Node 1: Cleanup Bus (Inpainting)
