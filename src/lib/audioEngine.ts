@@ -99,8 +99,6 @@ export class AudioMixingEngine {
   private isInitialized = false;
   private activeSources: { source: AudioBufferSourceNode, gain: GainNode }[] = [];
 
-  constructor() {}
-
   init(mediaElement?: HTMLMediaElement) {
     if (this.isInitialized) return;
     this.audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
