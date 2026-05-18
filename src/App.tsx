@@ -30,7 +30,7 @@ import {
   Library,
   Type
 } from "lucide-react";
-import { motion, AnimatePresence } from "motion/react";
+import { motion } from "motion/react";
 import { VideoMetadata, EditPlan, EditOperation } from "./types";
 import { parseEditingInstructions } from "./services/aiService";
 import { AudioMixingEngine, SmartMusicSetter, AudioEvent } from "./lib/audioEngine";
