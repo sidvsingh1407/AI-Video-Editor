@@ -32,7 +32,7 @@ Interact with your video using natural language.
 - **Frontend**: React 18, TypeScript, Tailwind CSS, Lucide React.
 - **Animation**: Motion (motion/react).
 - **Video Engine**: HTML5 Canvas + MediaRecorder API.
-- **Backend**: Node.js Express (Synthesis Job Management & Logs).
+- **Backend**: Vercel Serverless Functions (Synthesis Job Management & Logs).
 - **AI Logic**: Intelligent instruction parsing and timeline mapping.
 
 ## 🏗️ Getting Started
@@ -42,16 +42,38 @@ Interact with your video using natural language.
 npm install
 ```
 
-### Development
+### Local Development (Vercel CLI)
+We use the Vercel CLI to run both the Vite frontend and serverless API functions simultaneously. Ensure you have the Vercel CLI installed globally:
+```bash
+npm install -g vercel
+```
+Then start the development server:
 ```bash
 npm run dev
 ```
-The server will start on `http://localhost:3000`.
+The server will start, handling both frontend routing and `/api/*` serverless requests.
 
-### Building for Production
-```bash
-npm run build
+### Deployment to Vercel
+This project is configured to deploy directly to Vercel.
+1. Push your code to a GitHub repository.
+2. In the Vercel Dashboard, select **Add New > Project**.
+3. Import your GitHub repository.
+4. Vercel will automatically detect the Vite framework and handle the build settings.
+5. Ensure your environment variables (like `GEMINI_API_KEY`) are set in the project settings.
+6. Click **Deploy**.
+
+### Future Database Integration (Placeholder)
+Currently, the serverless API routes mock the job state. Since Vercel Serverless Functions are stateless, a persistent data store is required for production.
+
+**Setup Instructions (Future):**
+1. Provision a database (e.g., Upstash Redis, Vercel Postgres).
+2. Add the connection strings to your `.env` (for local) and Vercel Environment Variables:
+```env
+# Example for Upstash Redis
+KV_REST_API_URL="your-upstash-url"
+KV_REST_API_TOKEN="your-upstash-token"
 ```
+3. Update `api/render.ts` and `api/render/[jobId].ts` to replace the mocked state with database queries.
 
 ## 📋 Engine Diagnostics
 NovaCut includes a built-in diagnostic overlay for developers and power users:
