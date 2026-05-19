@@ -53,6 +53,23 @@ The server will start on `http://localhost:3000`.
 npm run build
 ```
 
+## 🚀 Deployment
+
+NovaCut AI requires a persistent Node.js environment to maintain the backend job processing and in-memory synthesis logs. Traditional static hosts (like Vercel or Netlify) are not recommended due to serverless constraints.
+
+We recommend deploying to **Render** using the provided Blueprint configuration.
+
+### Deploying to Render
+1. Push your code to a GitHub/GitLab repository.
+2. Sign up or log in to [Render](https://render.com/).
+3. Go to the Render Dashboard and click **New+** > **Blueprint**.
+4. Connect your repository. Render will automatically detect the `render.yaml` file.
+5. In the Render Dashboard, go to your new Web Service's **Environment** tab.
+6. Set the required Environment Variables:
+   - `GEMINI_API_KEY`: Your Google Gemini API Key.
+   - `APP_URL`: The URL provided by Render for your application (e.g., `https://novacut-ai.onrender.com`).
+7. Save changes. Render will build and deploy your application.
+
 ## 📋 Engine Diagnostics
 NovaCut includes a built-in diagnostic overlay for developers and power users:
 - **`[ENGINE] ACTIVE_EDITS`**: Real-time count of active synthesis layers.
