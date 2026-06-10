@@ -59,6 +59,7 @@ export const parseEditingInstructions = async (userPrompt: string, videoDuration
     - "Smart Master": Combine Branding + Speed Ramping + Watermark Fix (Global).
     - "Watermark Removal": Use type: "blur", target: "watermark". Specify 'rect' if position is implied. ALWAYS use scope: "global" and start: "0", end: "end" unless a specific time segment is mentioned.
     - "Logo/Branding": Add parameters.rect. Use scope: "global" and start: "0", end: "end" for permanent logos. Case: "add my logo" -> type: "branding".
+    - "Avatar / Lip Sync": Use type: "avatar", target: "talking_head". Specify parameters.rect for position (e.g. bottom right corner). Use scope: "global" and start: "0", end: "end" for full video.
     - "Trim / Cut": Use type: "remove", target: "segment". To trim the end, use start: "duration - trim_amount", end: "end".
     - "Append / Insert B-Roll": Use type: "insert", target: "b-roll". If appending to end, use start: "end", end: "end + broll_duration".
     - "Soundtrack Engine": When asked for audio analysis or mood setting, return operations with type: "music" and parameters: { base: "BL-XX", overlay: "EO-XX", event: "ET-XX", emotion: "EmotionName" }.

@@ -99,6 +99,10 @@ export class AudioMixingEngine {
   private isInitialized = false;
   private activeSources: { source: AudioBufferSourceNode, gain: GainNode }[] = [];
 
+  // Analyser node for Lip Sync & frequency analysis
+  public analyser: AnalyserNode | null = null;
+  public frequencyData: Uint8Array | null = null;
+
   constructor() {}
 
   init(mediaElement?: HTMLMediaElement) {
@@ -106,14 +110,19 @@ export class AudioMixingEngine {
     this.audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
     this.dest = this.audioContext.createMediaStreamDestination();
     this.master = this.audioContext.createGain();
-    this.master.connect(this.audioContext.destination);
+    this.analyser = this.audioContext.createAnalyser();
+
+    this.analyser.fftSize = 256;
+    this.frequencyData = new Uint8Array(this.analyser.frequencyBinCount);
+
+    this.master.connect(this.analyser);
+    this.analyser.connect(this.audioContext.destination);
     this.master.connect(this.dest);
     this.master.gain.setValueAtTime(0.8, this.audioContext.currentTime);
 
     if (mediaElement) {
       const source = this.audioContext.createMediaElementSource(mediaElement);
-      source.connect(this.audioContext.destination);
-      source.connect(this.dest);
+      source.connect(this.master);
     }
     this.isInitialized = true;
   }
@@ -183,6 +192,14 @@ export class AudioMixingEngine {
 
   getStream() {
     return this.dest?.stream || null;
+  }
+
+  getAudioFrequencyData(): Uint8Array | null {
+    if (this.analyser && this.frequencyData) {
+      this.analyser.getByteFrequencyData(this.frequencyData);
+      return this.frequencyData;
+    }
+    return null;
   }
 
   applySmartDucking(isSpeechDetected: boolean) {
