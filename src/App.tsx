@@ -264,40 +264,36 @@ export default function App() {
 
   const clockRef = useRef(0);
   const lastFrameTimeRef = useRef(0);
+  const lastRenderTimeRef = useRef(0);
   const extensionTriggeredRef = useRef(false);
 
-  // Advanced AI Inpainting Utility
+  // Advanced AI Inpainting Utility (Hardware Accelerated)
   const aiInpaintWatermark = (ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, rect: any, strength = 0.95, noiseLevel = 15) => {
     const { x, y, w, h } = rect;
     if (w <= 0 || h <= 0) return;
 
     ctx.save();
-    try {
-      const imageData = ctx.getImageData(x, y, w, h);
-      const data = imageData.data;
-      const margin = 8;
-      
-      const tE = ctx.getImageData(x, Math.max(0, y - margin), w, margin).data;
-      const bE = ctx.getImageData(x, Math.min(canvas.height - margin, y + h), w, margin).data;
-      
-      for (let i = 0; i < data.length; i += 4) {
-        const px = (i / 4) % w;
-        const py = Math.floor((i / 4) / w);
-        const wY = py / h;
 
-        for (let c = 0; c < 3; c++) {
-          const sampled = (tE[Math.floor(px) * 4 + c] * (1 - wY)) + (bE[Math.floor(px) * 4 + c] * wY);
-          const noise = (Math.random() - 0.5) * noiseLevel;
-          data[i + c] = Math.max(0, Math.min(255, (sampled * strength) + (data[i + c] * (1 - strength)) + noise));
-        }
-        data[i + 3] = 255;
-      }
-      ctx.putImageData(imageData, x, y);
-    } catch(e) {}
+    // Instead of CPU-bound pixel manipulation, we use hardware-accelerated
+    // canvas compositing and filters to simulate the inpainting effect.
 
-    ctx.filter = `blur(${Math.round(w * 0.05)}px)`;
-    ctx.globalAlpha = 0.3;
-    ctx.drawImage(canvas, x - 10, y - 10, w + 20, h + 20, x, y, w, h);
+    // 1. Create a blurred backdrop (simulating inpainting)
+    ctx.beginPath();
+    ctx.rect(x, y, w, h);
+    ctx.clip();
+
+    ctx.filter = `blur(${Math.max(4, Math.round(w * 0.05))}px) brightness(1.1)`;
+    // Draw an enlarged version of the surrounding area to fill the space
+    const pad = 10;
+    ctx.drawImage(canvas,
+      Math.max(0, x - pad), Math.max(0, y - pad), w + pad*2, h + pad*2,
+      x - pad, y - pad, w + pad*2, h + pad*2
+    );
+
+    // 2. Add noise layer (hardware accelerated via pattern/fill)
+    // Avoid flashing by generating noise once or using static fill, but we omit the flashing rect.
+    // Instead we rely on the blurred/brightness backdrop.
+
     ctx.restore();
   };
 
@@ -319,23 +315,27 @@ export default function App() {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    const renderFrame = () => {
+    const renderFrame = (timestamp: number) => {
       const duration = videoElement.duration;
       const deltaTime = (isPlaying || renderStatus === 'rendering') ? (1 / 30) : 0; 
       
+      // Memoize parsed ops per frame
+      const ops = activeOpsRef.current.map(op => ({
+        ...op,
+        parsedStart: parseTime(op.start, duration),
+        parsedEnd: parseTime(op.end, duration)
+      }));
+
       if (isPlaying || renderStatus === 'rendering') {
         clockRef.current += deltaTime * videoElement.playbackRate;
-        setCurrentTime(Math.min(clockRef.current, Math.max(videoElement.duration, ...activeOpsRef.current.map(o => parseTime(o.end, videoElement.duration)))));
       }
 
       const currentTime = clockRef.current;
-      const ops = activeOpsRef.current;
       
       const effectiveEndTimes = ops.map(op => {
-        const start = parseTime(op.start, duration);
-        let end = parseTime(op.end, duration);
+        let end = op.parsedEnd;
         if (op.type === 'insert' && bRollVideoRef.current?.duration) {
-          end = Math.max(end, start + bRollVideoRef.current.duration);
+          end = Math.max(end, op.parsedStart + bRollVideoRef.current.duration);
         }
         return end;
       });
@@ -343,17 +343,23 @@ export default function App() {
       const maxEndTime = Math.max(duration, ...effectiveEndTimes, duration > 0 ? duration + 3 : 0);
       const isFinished = currentTime >= maxEndTime - 0.05;
 
+      // Unthrottle currentTime for smooth scrubber updates, but throttle render progress
+      setCurrentTime(Math.min(currentTime, maxEndTime));
+      if (renderStatus === 'rendering' && duration > 0) {
+        if (timestamp - lastRenderTimeRef.current > 250) {
+          setRenderProgress((currentTime / maxEndTime) * 100);
+          lastRenderTimeRef.current = timestamp;
+        }
+      }
+
       if (isFinished) {
         if (renderStatus === 'rendering') {
           setRenderProgress(100);
+          setCurrentTime(maxEndTime);
           stopRecording();
         }
         setIsPlaying(false);
         return;
-      }
-
-      if (renderStatus === 'rendering' && duration > 0) {
-        setRenderProgress((currentTime / maxEndTime) * 100);
       }
 
       // Check for start of extension
@@ -363,9 +369,7 @@ export default function App() {
       }
 
       const activeOps = ops.filter(op => {
-        const start = parseTime(op.start, duration);
-        const end = parseTime(op.end, maxEndTime);
-        return currentTime >= start && currentTime <= end;
+        return currentTime >= op.parsedStart && currentTime <= op.parsedEnd;
       });
 
       // DAG PIPELINE NODES
@@ -406,7 +410,7 @@ export default function App() {
 
         if (op.type === 'branding' && rect && logoImgRef.current?.complete) {
           const animation = op.parameters.animation;
-          const opStart = parseTime(op.start, duration);
+          const opStart = op.parsedStart;
           const progress = Math.min(1, (currentTime - opStart) / 1.5);
           
           ctx.save();
@@ -484,6 +488,7 @@ export default function App() {
          if (op.type === 'captions') {
            const captions = op.parameters.captions_list || [];
            const currentCaption = captions.find((c: any) => {
+             // Cache parsing for captions if possible, but fallback for now
              const s = parseTime(c.start, duration);
              const e = parseTime(c.end, duration);
              return currentTime >= s && currentTime <= e;
@@ -501,8 +506,8 @@ export default function App() {
            if (!text) return;
 
            ctx.save();
-           const opStart = parseTime(op.start, duration);
-           const opEnd = parseTime(op.end, duration);
+           const opStart = op.parsedStart;
+           const opEnd = op.parsedEnd;
            const elapsed = currentTime - opStart;
            
            if (style === 'title') {

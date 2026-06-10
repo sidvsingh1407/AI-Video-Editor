@@ -179,7 +179,15 @@ export class AudioMixingEngine {
       source.start(now + event.startTime);
       source.stop(now + event.startTime + event.duration);
 
-      this.activeSources.push({ source, gain: gainNode });
+      const activeEntry = { source, gain: gainNode };
+      this.activeSources.push(activeEntry);
+
+      // Memory Leak Fix: Clean up nodes when they finish playing
+      source.onended = () => {
+        source.disconnect();
+        gainNode.disconnect();
+        this.activeSources = this.activeSources.filter(s => s !== activeEntry);
+      };
     });
   }
 
